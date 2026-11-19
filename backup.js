@@ -156,7 +156,7 @@ export function humanSize(bytes) {
 
 /* ================= 浏览器部分：能力检测 ================= */
 
-export function supportInfo() {
+export function backupSupport() {
   const secure = globalThis.isSecureContext !== false;
   const picker = typeof globalThis.showDirectoryPicker === 'function';
   return { supported: picker && secure, secure, picker };
@@ -255,11 +255,11 @@ let statusCache = {
 };
 const hooks = { onChange: null, onError: null };
 
-export function setHooks(next) {
+export function setBackupHooks(next) {
   Object.assign(hooks, next || {});
 }
 
-export function status() {
+export function backupStatus() {
   return { ...statusCache };
 }
 
@@ -296,7 +296,7 @@ async function readFileText(handle, name) {
   });
 }
 
-export async function listFiles(handle = currentHandle) {
+export async function listBackupFiles(handle = currentHandle) {
   if (!handle) return [];
   const out = [];
   for await (const [name, entry] of handle.entries()) {
@@ -332,15 +332,15 @@ function describeError(err) {
 /* ================= 对外流程 ================= */
 
 // 启动时调用：把上次的目录句柄取回来
-export async function init() {
-  const { supported } = supportInfo();
+export async function initBackup() {
+  const { supported } = backupSupport();
   currentHandle = supported ? await loadHandle() : null;
   await refreshStatus();
   return statusCache;
 }
 
 export async function refreshStatus() {
-  const { supported } = supportInfo();
+  const { supported } = backupSupport();
   const settings = getState().settings.backup || {};
   let permission = 'none';
   if (currentHandle) {
@@ -360,13 +360,13 @@ export async function refreshStatus() {
     lastBackupAt: Number(settings.lastBackupAt) || 0,
     lastName: settings.lastName || '',
   };
-  if (hooks.onChange) hooks.onChange(status());
+  if (hooks.onChange) hooks.onChange(backupStatus());
   return statusCache;
 }
 
 // 必须在点击手势里调用：系统文件夹选择器
-export async function chooseDirectory() {
-  const { supported, secure } = supportInfo();
+export async function chooseBackupDir() {
+  const { supported, secure } = backupSupport();
   if (!supported) {
     throw new BackupError(
       secure ? '当前浏览器不支持选择文件夹（需要 Chrome 132+）' : '需要 HTTPS 才能选择文件夹',
@@ -399,7 +399,7 @@ function updateSettingsMuted(patch) {
 }
 
 // 写一份快照到已选的文件夹；返回 { ok, fileName } 或 { ok:false, code, message }
-export async function backupNow() {
+export async function writeBackupNow() {
   if (!currentHandle) return { ok: false, code: 'NO_DIR', message: '还没有选择备份文件夹' };
   const permission = await permissionOf(currentHandle, { request: false });
   if (permission !== 'granted') return { ok: false, code: 'NO_PERM', message: '需要先确认备份文件夹的访问权限' };
@@ -412,7 +412,7 @@ export async function backupNow() {
     await writeFile(currentHandle, name, text);
     lastWritten = text;
     updateSettingsMuted({ backup: { lastBackupAt: Date.now(), lastName: name } });
-    await pruneNow({ silent: true });
+    await pruneBackups({ silent: true });
     await refreshStatus();
     return { ok: true, fileName: name };
   } catch (err) {
@@ -427,7 +427,7 @@ export async function backupNow() {
   }
 }
 
-export function schedule() {
+export function scheduleBackup() {
   if (suppress) return;
   const settings = getState().settings.backup || {};
   if (settings.enabled === false) return;
@@ -435,24 +435,24 @@ export function schedule() {
   clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
-    void backupNow();
+    void writeBackupNow();
   }, DEBOUNCE_MS);
 }
 
 // 页面要隐藏时尽力立刻写一次（不保证写完）
-export async function flush() {
+export async function flushBackup() {
   if (!timer) return { ok: true, skipped: true };
   clearTimeout(timer);
   timer = null;
-  return backupNow();
+  return writeBackupNow();
 }
 
-export async function pruneNow({ silent = false } = {}) {
+export async function pruneBackups({ silent = false } = {}) {
   if (!currentHandle) return { ok: false, code: 'NO_DIR', message: '还没有选择备份文件夹' };
   const permission = await permissionOf(currentHandle, { request: false });
   if (permission !== 'granted') return { ok: false, code: 'NO_PERM', message: '需要先确认备份文件夹的访问权限' };
   try {
-    const files = await listFiles(currentHandle);
+    const files = await listBackupFiles(currentHandle);
     const keep = (getState().settings.backup || {}).keep || 3;
     const plan = prunePlan(files.map((f) => f.name), keep);
     for (const name of plan.remove) {
@@ -501,7 +501,7 @@ export async function restoreFromText(text) {
   };
 }
 
-export async function restoreFromFile(file) {
+export async function restoreBackupFromFile(file) {
   if (!file) throw new BackupError('没有选中文件', 'NO_FILE');
   const text =
     typeof file.text === 'function'
@@ -516,7 +516,7 @@ export async function restoreFromFile(file) {
 }
 
 // 在点击手势里重新确认权限（浏览器重启后句柄会变回 prompt）
-export async function requestAccess() {
+export async function requestBackupAccess() {
   if (!currentHandle) return 'none';
   const state = await permissionOf(currentHandle, { request: true });
   await refreshStatus();
@@ -524,11 +524,11 @@ export async function requestAccess() {
 }
 
 // 从已选文件夹里取最新的一份快照恢复
-export async function restoreLatest() {
+export async function restoreLatestBackup() {
   if (!currentHandle) throw new BackupError('还没有选择备份文件夹', 'NO_DIR');
   const permission = await permissionOf(currentHandle, { request: true });
   if (permission !== 'granted') throw new BackupError('没有拿到备份文件夹的读取权限', 'DENIED');
-  const files = await listFiles(currentHandle);
+  const files = await listBackupFiles(currentHandle);
   const latest = files.find((f) => f.kind === 'backup');
   if (!latest) throw new BackupError('这个文件夹里没有备份文件', 'EMPTY');
   const text = await readFileText(currentHandle, latest.name);
@@ -537,7 +537,7 @@ export async function restoreLatest() {
 }
 
 // 恢复指定文件名的快照（恢复弹层里点某一行）
-export async function restoreByName(name) {
+export async function restoreBackupByName(name) {
   if (!currentHandle) throw new BackupError('还没有选择备份文件夹', 'NO_DIR');
   const permission = await permissionOf(currentHandle, { request: true });
   if (permission !== 'granted') throw new BackupError('没有拿到备份文件夹的读取权限', 'DENIED');
@@ -547,7 +547,7 @@ export async function restoreByName(name) {
 }
 
 // 降级路径：没有文件夹支持时，直接把完整快照下载成文件
-export function buildExport(now = Date.now()) {
+export function buildBackupExport(now = Date.now()) {
   const text = stringifySnapshot(getState(), now);
   return {
     text,

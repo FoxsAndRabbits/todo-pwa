@@ -67,21 +67,21 @@ import {
 } from './remind.js';
 import { buildXlsx, xlsxBlob } from './xlsx.js';
 import {
-  init as initBackup,
-  setHooks as setBackupHooks,
-  status as backupStatus,
-  supportInfo as backupSupport,
-  chooseDirectory as chooseBackupDir,
-  backupNow as backupNowRun,
-  schedule as scheduleBackup,
-  flush as flushBackup,
-  pruneNow as pruneBackup,
-  listFiles as listBackupFiles,
-  restoreLatest as restoreBackupLatest,
-  restoreByName as restoreBackupByName,
-  restoreFromFile as restoreBackupFile,
-  requestAccess as requestBackupAccess,
-  buildExport as buildBackupExport,
+  initBackup,
+  setBackupHooks,
+  backupStatus,
+  backupSupport,
+  chooseBackupDir,
+  writeBackupNow,
+  scheduleBackup,
+  flushBackup,
+  pruneBackups,
+  listBackupFiles,
+  restoreLatestBackup,
+  restoreBackupByName,
+  restoreBackupFromFile,
+  requestBackupAccess,
+  buildBackupExport,
   humanSize,
 } from './backup.js';
 
@@ -1444,7 +1444,7 @@ $$('[data-set]').forEach((el) => {
     if (key === 'theme') applyTheme();
     if (key === 'backup.keep') {
       el.value = String(value);
-      await pruneBackup();
+      await pruneBackups();
       renderBackupStatus();
     }
     if (key === 'backup.enabled') {
@@ -1610,7 +1610,7 @@ async function oneTapRestore() {
   }
   try {
     await chooseBackupDir();
-    const res = await restoreBackupLatest();
+    const res = await restoreLatestBackup();
     toast(
       `已从备份恢复 ${res.taskCount} 条任务${res.exportedAt ? `（备份于 ${fmtDateTime(res.exportedAt)}）` : ''}`,
       4200,
@@ -1700,7 +1700,7 @@ async function openRestoreModal() {
 els.btnChooseBackupDir.addEventListener('click', async () => {
   try {
     await chooseBackupDir();
-    const res = await backupNowRun();
+    const res = await writeBackupNow();
     syncSettingsForm();
     renderBackupStatus();
     if (res.ok) toast(`已备份到「${backupStatus().dirName}」`);
@@ -1713,10 +1713,10 @@ els.btnChooseBackupDir.addEventListener('click', async () => {
 });
 
 els.btnBackupNow.addEventListener('click', async () => {
-  let res = await backupNowRun();
+  let res = await writeBackupNow();
   if (!res.ok && res.code === 'NO_PERM') {
     const perm = await requestBackupAccess();
-    if (perm === 'granted') res = await backupNowRun();
+    if (perm === 'granted') res = await writeBackupNow();
   }
   renderBackupStatus();
   if (res.ok) toast(res.skipped ? '内容没变化，无需重复写入' : `已备份：${res.fileName}`);
@@ -1760,7 +1760,7 @@ els.restoreBackupInput.addEventListener('change', async () => {
   const file = els.restoreBackupInput.files && els.restoreBackupInput.files[0];
   if (!file) return;
   try {
-    const res = await restoreBackupFile(file);
+    const res = await restoreBackupFromFile(file);
     closeModal('restoreModal');
     syncSettingsForm();
     render();

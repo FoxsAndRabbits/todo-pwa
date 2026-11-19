@@ -1,5 +1,5 @@
 // 离线缓存：应用壳 cache-first，导航请求回退到缓存页面。
-const CACHE = 'dsh-todo-v2';
+const CACHE = 'dsh-todo-v3';
 const ASSETS = [
   './',
   './index.html',
