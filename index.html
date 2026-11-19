@@ -395,18 +395,62 @@
       </section>
 
       <section class="group">
-        <h3>数据 · 导出</h3>
+        <h3>数据 · 备份与导出</h3>
         <p id="storageHint" class="hint"></p>
+
+        <p id="backupStatus" class="hint"></p>
+        <div class="btn-row">
+          <button type="button" id="btnChooseBackupDir" class="btn ghost">选择备份文件夹</button>
+          <button type="button" id="btnBackupNow" class="btn ghost">立即备份</button>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnExportBackup" class="btn ghost" hidden>导出完整备份（.json）</button>
+        </div>
+        <div class="grid2">
+          <label class="field"><span>备份保留份数</span>
+            <input id="backupKeep" type="number" min="1" max="20" step="1" inputmode="numeric" data-set="backup.keep">
+          </label>
+          <label class="switch"><input type="checkbox" data-set="backup.enabled"><span>改动后自动备份</span></label>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnRestoreDir" class="btn ghost">从文件夹恢复…</button>
+          <button type="button" id="btnRestoreFile" class="btn ghost">从文件恢复…</button>
+        </div>
+        <input id="restoreBackupInput" type="file" accept=".json,application/json" hidden>
+        <p class="hint">备份文件写在你自己选的文件夹里（不在浏览器里），清缓存带不走它。清「Cookie 和网站数据」之后回到这里点「从文件夹恢复」，选同一个文件夹即可找回。</p>
+
+        <div class="btn-row">
+          <button type="button" id="btnSafeClean" class="btn ghost">安全清理缓存（不动数据）</button>
+        </div>
+        <p id="saveErrorHint" class="hint warn" hidden></p>
+
         <div class="btn-row">
           <button type="button" id="btnExportXlsx" class="btn ghost">导出 Excel（全部）</button>
           <button type="button" id="btnExportCsv" class="btn ghost">导出 CSV（全部）</button>
         </div>
-        <p class="hint">导出的列包含开始日、计划完成时间、标签、状态、完成时间、周期、注意事项与回顾。</p>
+        <p class="hint">导出的列包含开始日、计划完成时间、标签、状态、完成时间、周期、注意事项与回顾。Excel / CSV 是给人看的表格，导不回应用；能导回的是上面的「完整备份」。</p>
         <div class="btn-row">
           <button type="button" id="btnClear" class="btn danger">清空全部数据</button>
         </div>
-        <p class="hint">数据只存在这台设备的浏览器里，清除浏览器数据会一并删除。</p>
+        <p class="hint">只清「缓存的图片和文件」不会动数据；勾了「Cookie 和网站数据」才会连待办一起清掉。</p>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- 从备份恢复 -->
+<div class="modal" id="restoreModal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="restoreTitle">
+    <div class="sheet-head">
+      <h2 id="restoreTitle">从备份恢复</h2>
+      <button type="button" class="icon-btn" data-close="restoreModal" aria-label="关闭">×</button>
+    </div>
+    <p class="hint" id="restoreMeta"></p>
+    <ul id="restoreList" class="list compact backup-list"></ul>
+    <p class="hint" id="restoreEmpty" hidden>这个文件夹里没有备份文件。换一个文件夹，或者用「从文件恢复」直接选文件。</p>
+    <div class="sheet-actions">
+      <button type="button" id="restoreOtherDir" class="btn ghost">换一个文件夹…</button>
+      <button type="button" data-close="restoreModal" class="btn primary">关闭</button>
     </div>
   </div>
 </div>

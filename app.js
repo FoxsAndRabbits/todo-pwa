@@ -23,6 +23,7 @@ import {
   getState,
   subscribe,
   isPersistent,
+  lastSaveError,
   addTask,
   updateTask,
   removeTask,
@@ -65,6 +66,24 @@ import {
   remindLabel,
 } from './remind.js';
 import { buildXlsx, xlsxBlob } from './xlsx.js';
+import {
+  init as initBackup,
+  setHooks as setBackupHooks,
+  status as backupStatus,
+  supportInfo as backupSupport,
+  chooseDirectory as chooseBackupDir,
+  backupNow as backupNowRun,
+  schedule as scheduleBackup,
+  flush as flushBackup,
+  pruneNow as pruneBackup,
+  listFiles as listBackupFiles,
+  restoreLatest as restoreBackupLatest,
+  restoreByName as restoreBackupByName,
+  restoreFromFile as restoreBackupFile,
+  requestAccess as requestBackupAccess,
+  buildExport as buildBackupExport,
+  humanSize,
+} from './backup.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -145,6 +164,19 @@ const els = {
   remindAck: $('#remindAck'),
   toast: $('#toast'),
   storageHint: $('#storageHint'),
+  backupStatus: $('#backupStatus'),
+  saveErrorHint: $('#saveErrorHint'),
+  btnChooseBackupDir: $('#btnChooseBackupDir'),
+  btnBackupNow: $('#btnBackupNow'),
+  btnExportBackup: $('#btnExportBackup'),
+  btnRestoreDir: $('#btnRestoreDir'),
+  btnRestoreFile: $('#btnRestoreFile'),
+  restoreBackupInput: $('#restoreBackupInput'),
+  btnSafeClean: $('#btnSafeClean'),
+  restoreOtherDir: $('#restoreOtherDir'),
+  restoreMeta: $('#restoreMeta'),
+  restoreList: $('#restoreList'),
+  restoreEmpty: $('#restoreEmpty'),
   notifyHint: $('#notifyHint'),
 };
 
@@ -303,6 +335,11 @@ function render() {
     : '当前环境无法写入本地存储，刷新后数据会丢失（可能是隐私模式或 file:// 打开）。';
   els.storageHint.classList.toggle('warn', !isPersistent());
 
+  renderBackupStatus();
+  const saveErr = lastSaveError();
+  els.saveErrorHint.hidden = !saveErr;
+  els.saveErrorHint.textContent = saveErr ? `本地存储写入失败（${saveErr}），新改动可能没存下来。先导出一份完整备份。` : '';
+
   const perm = notifyPermission();
   els.notifyHint.textContent =
     perm === 'granted'
@@ -451,6 +488,9 @@ function renderList(tasks, today) {
     const p = document.createElement('p');
     p.textContent = '点右下角 + 新建一条；也可以先用「筛选」把范围缩小。';
     li.append(strong, p);
+    // 本地一条任务都没有时，给「从备份恢复」入口。不能看「备份过」的标记——
+    // 那个标记和任务存在同一个 localStorage 里，清站点数据时一起没了。
+    if (snap().tasks.length === 0) li.appendChild(emptyRestoreButton());
     els.list.appendChild(li);
     return;
   }
@@ -1370,6 +1410,8 @@ function syncSettingsForm() {
     'remind.maxPerDay': String(s.remind.maxPerDay),
     weekStart: String(s.weekStart),
     theme: s.theme,
+    'backup.enabled': s.backup.enabled,
+    'backup.keep': String(s.backup.keep),
   };
   for (const el of $$('[data-set]')) {
     const key = el.dataset.set;
@@ -1384,6 +1426,7 @@ $$('[data-set]').forEach((el) => {
     const key = el.dataset.set;
     let value;
     if (el.type === 'checkbox') value = el.checked;
+    else if (key === 'backup.keep') value = Math.max(1, Math.min(20, Math.round(Number(el.value)) || 3));
     else if (el.type === 'number') value = Math.max(1, Math.min(10, Number(el.value) || 1));
     else if (key === 'weekStart') value = Number(el.value);
     else if (key === 'remind.thresholdHours' || key === 'remind.maxPerDay') value = Number(el.value);
@@ -1399,6 +1442,16 @@ $$('[data-set]').forEach((el) => {
     }
     updateSettings(setPath(key, value));
     if (key === 'theme') applyTheme();
+    if (key === 'backup.keep') {
+      el.value = String(value);
+      await pruneBackup();
+      renderBackupStatus();
+    }
+    if (key === 'backup.enabled') {
+      el.checked = !!value;
+      renderBackupStatus();
+      if (value) scheduleBackup();
+    }
   });
 });
 
@@ -1504,6 +1557,240 @@ function exportCsv() {
 $('#btnExportXlsx').addEventListener('click', exportExcel);
 $('#btnExportCsv').addEventListener('click', exportCsv);
 
+/* ---------------- 备份：文件夹自动备份 / 恢复 ---------------- */
+let restoreFiles = [];
+let restoreArmed = null;
+let restoreArmTimer = null;
+
+function backupErrorMessage(err) {
+  if (err && (err.name === 'AbortError' || err.code === 'CANCELLED')) return '';
+  return (err && err.message) || '操作失败';
+}
+
+function renderBackupStatus() {
+  const st = backupStatus();
+  const parts = [];
+  if (!st.supported) {
+    parts.push('当前浏览器不支持「选择文件夹」自动备份（需要 Chrome 132+ 或桌面版），已降级为「导出完整备份 / 从文件恢复」');
+  } else if (!st.hasHandle) {
+    parts.push('还没选备份文件夹：选一个之后，每次改动 5 秒内会写一份快照进去');
+  } else if (st.permission !== 'granted') {
+    parts.push(`备份文件夹「${st.dirName}」需要点一下「立即备份」重新确认权限`);
+  } else if (!st.enabled) {
+    parts.push(`备份文件夹「${st.dirName}」（自动备份已关闭）`);
+  } else {
+    parts.push(`备份文件夹「${st.dirName}」`);
+  }
+  if (st.hasHandle && st.lastBackupAt) parts.push(`最近备份 ${fmtDateTime(st.lastBackupAt)}`);
+  parts.push(`保留 ${st.keep} 份`);
+  els.backupStatus.textContent = parts.join(' · ');
+  els.backupStatus.classList.toggle('warn', st.hasHandle && st.permission !== 'granted');
+  els.btnChooseBackupDir.hidden = !st.supported;
+  els.btnRestoreDir.hidden = !st.supported;
+  els.btnExportBackup.hidden = st.supported;
+}
+
+// 空列表里的入口：不依赖任何本地标记（标记本身也会被清掉）
+function emptyRestoreButton() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'btnEmptyRestore';
+  btn.className = 'btn ghost restore-cta';
+  btn.textContent = backupSupport().supported ? '从备份恢复' : '从备份文件恢复';
+  btn.addEventListener('click', () => {
+    void oneTapRestore();
+  });
+  return btn;
+}
+
+async function oneTapRestore() {
+  if (!backupSupport().supported) {
+    pickBackupFile();
+    return;
+  }
+  try {
+    await chooseBackupDir();
+    const res = await restoreBackupLatest();
+    toast(
+      `已从备份恢复 ${res.taskCount} 条任务${res.exportedAt ? `（备份于 ${fmtDateTime(res.exportedAt)}）` : ''}`,
+      4200,
+    );
+    syncSettingsForm();
+    render();
+  } catch (err) {
+    const msg = backupErrorMessage(err);
+    if (!msg) return;
+    toast(msg, 3600);
+    renderBackupStatus();
+  }
+}
+
+function pickBackupFile() {
+  els.restoreBackupInput.value = '';
+  els.restoreBackupInput.click();
+}
+
+function renderRestoreRows() {
+  els.restoreMeta.textContent = restoreFiles.length
+    ? `文件夹「${backupStatus().dirName}」里有 ${restoreFiles.length} 个文件，点一份覆盖当前数据。`
+    : '';
+  els.restoreEmpty.hidden = restoreFiles.length > 0;
+  els.restoreList.innerHTML = '';
+  for (const file of restoreFiles) {
+    const li = document.createElement('li');
+    li.className = 'backup-row' + (restoreArmed === file.name ? ' armed' : '');
+    li.tabIndex = 0;
+    li.dataset.name = file.name;
+
+    const head = document.createElement('p');
+    head.className = 'backup-row-head';
+    head.textContent = restoreArmed === file.name ? '再点一次，覆盖当前数据' : fmtDateTime(file.ts);
+
+    const meta = document.createElement('span');
+    meta.className = 'muted';
+    meta.textContent = `${file.kind === 'backup' ? '备份' : '恢复前快照'} · ${humanSize(file.size)} · ${file.name}`;
+
+    li.append(head, meta);
+    li.addEventListener('click', () => onRestoreRowClick(file));
+    els.restoreList.appendChild(li);
+  }
+}
+
+function onRestoreRowClick(file) {
+  // 本地空数据时没有东西可覆盖，一次点击就恢复
+  if (snap().tasks.length === 0) {
+    void doRestore(file);
+    return;
+  }
+  if (restoreArmed === file.name) {
+    restoreArmed = null;
+    void doRestore(file);
+    return;
+  }
+  restoreArmed = file.name;
+  renderRestoreRows();
+  clearTimeout(restoreArmTimer);
+  restoreArmTimer = setTimeout(() => {
+    restoreArmed = null;
+    renderRestoreRows();
+  }, 5000);
+}
+
+async function doRestore(file) {
+  try {
+    const res = await restoreBackupByName(file.name);
+    closeModal('restoreModal');
+    restoreArmed = null;
+    syncSettingsForm();
+    render();
+    toast(`已恢复 ${res.taskCount} 条任务、${res.seriesCount} 个周期、${res.tagCount} 个标签`, 4200);
+  } catch (err) {
+    toast(backupErrorMessage(err) || '恢复失败', 3600);
+    renderRestoreRows();
+  }
+}
+
+async function openRestoreModal() {
+  restoreArmed = null;
+  restoreFiles = await listBackupFiles();
+  renderRestoreRows();
+  openModal('restoreModal');
+}
+
+els.btnChooseBackupDir.addEventListener('click', async () => {
+  try {
+    await chooseBackupDir();
+    const res = await backupNowRun();
+    syncSettingsForm();
+    renderBackupStatus();
+    if (res.ok) toast(`已备份到「${backupStatus().dirName}」`);
+    else if (res.message) toast(res.message, 3600);
+  } catch (err) {
+    const msg = backupErrorMessage(err);
+    if (msg) toast(msg, 3600);
+    renderBackupStatus();
+  }
+});
+
+els.btnBackupNow.addEventListener('click', async () => {
+  let res = await backupNowRun();
+  if (!res.ok && res.code === 'NO_PERM') {
+    const perm = await requestBackupAccess();
+    if (perm === 'granted') res = await backupNowRun();
+  }
+  renderBackupStatus();
+  if (res.ok) toast(res.skipped ? '内容没变化，无需重复写入' : `已备份：${res.fileName}`);
+  else toast(res.message || '备份失败', 3600);
+});
+
+els.btnExportBackup.addEventListener('click', () => {
+  const { blob, fileName } = buildBackupExport();
+  if (!blob) return;
+  download(blob, fileName);
+  toast(`已导出完整备份 ${fileName}`);
+});
+
+els.btnRestoreDir.addEventListener('click', async () => {
+  const st = backupStatus();
+  try {
+    if (!st.hasHandle) await chooseBackupDir();
+    else if (st.permission !== 'granted') await requestBackupAccess();
+    await openRestoreModal();
+  } catch (err) {
+    const msg = backupErrorMessage(err);
+    if (msg) toast(msg, 3600);
+    else renderBackupStatus();
+  }
+});
+
+els.restoreOtherDir.addEventListener('click', async () => {
+  try {
+    await chooseBackupDir();
+    restoreFiles = await listBackupFiles();
+    renderRestoreRows();
+  } catch (err) {
+    const msg = backupErrorMessage(err);
+    if (msg) toast(msg, 3600);
+  }
+});
+
+els.btnRestoreFile.addEventListener('click', () => pickBackupFile());
+
+els.restoreBackupInput.addEventListener('change', async () => {
+  const file = els.restoreBackupInput.files && els.restoreBackupInput.files[0];
+  if (!file) return;
+  try {
+    const res = await restoreBackupFile(file);
+    closeModal('restoreModal');
+    syncSettingsForm();
+    render();
+    toast(`已从文件恢复 ${res.taskCount} 条任务`, 4200);
+  } catch (err) {
+    toast(backupErrorMessage(err) || '恢复失败', 3600);
+  } finally {
+    els.restoreBackupInput.value = '';
+  }
+});
+
+els.btnSafeClean.addEventListener('click', async () => {
+  let removed = 0;
+  try {
+    const keys = (await caches.keys()) || [];
+    for (const key of keys) {
+      if (await caches.delete(key)) removed += 1;
+    }
+  } catch {
+    /* 没有 CacheStorage 就跳过 */
+  }
+  try {
+    const reg = navigator.serviceWorker && (await navigator.serviceWorker.getRegistration());
+    if (reg) await reg.update();
+  } catch {
+    /* 忽略 */
+  }
+  toast(`已清理 ${removed} 份离线缓存并检查更新（数据没动），下次打开生效`, 3600);
+});
+
 /* ---------------- 提醒 ---------------- */
 let reminding = false;
 
@@ -1572,6 +1859,9 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     checkReminders();
     tickSeries();
+  } else {
+    // 页面要进后台了，把挂起的自动备份尽快落盘（不保证写完）
+    void flushBackup();
   }
 });
 window.addEventListener('focus', () => {
@@ -1610,8 +1900,42 @@ applyTheme();
 syncSettingsForm();
 syncFilterForm();
 subscribe(() => render());
+subscribe(() => scheduleBackup());
+setBackupHooks({
+  onChange: () => renderBackupStatus(),
+  onError: (info) => {
+    if (info && info.message) toast(info.message, 3600);
+  },
+});
 render();
 tickSeries();
 registerServiceWorker();
 scheduleRemindLoop();
 setTimeout(checkReminders, 600);
+
+function requestPersistentStorage() {
+  const storage = navigator.storage;
+  if (!storage || typeof storage.persist !== 'function') return;
+  const ask = () => {
+    storage.persist().catch(() => {
+      /* 浏览器拒绝就算了，不影响使用 */
+    });
+  };
+  if (typeof storage.persisted === 'function') {
+    storage.persisted().then((already) => {
+      if (!already) ask();
+    }).catch(ask);
+  } else {
+    ask();
+  }
+}
+
+(async () => {
+  await initBackup();
+  renderBackupStatus();
+  syncSettingsForm();
+  render();
+  requestPersistentStorage();
+  const saveErr = lastSaveError();
+  if (saveErr && isPersistent()) toast(`本地存储写入失败（${saveErr}），建议先导出完整备份`, 4200);
+})();

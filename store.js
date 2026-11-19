@@ -31,6 +31,7 @@ export const TAG_COLORS = [
 let state = null;
 let backend = null;
 let persistent = true;
+let saveError = '';
 const listeners = new Set();
 
 /* ---------------- 默认值 ---------------- */
@@ -49,6 +50,8 @@ export function defaultSettings() {
     sort: { key: 'due', dir: 'asc' },
     weekStart: 1,
     theme: 'auto',
+    // 文件夹自动备份（句柄本身存在 IndexedDB，不在这里）
+    backup: { enabled: true, keep: 3, lastBackupAt: 0, lastName: '', dirName: '' },
     ui: {
       view: 'all',
       status: 'all',
@@ -219,6 +222,15 @@ function normalize(raw) {
   ui.tags = Array.isArray(ui.tags) ? ui.tags.filter((tag) => merged.tagLibrary.some((t) => t.name === tag)) : [];
   // 搜索词不跨会话保留，其余筛选保留
   ui.q = '';
+
+  if (!isPlainObject(merged.settings.backup)) merged.settings.backup = defaultSettings().backup;
+  const b = merged.settings.backup;
+  const keep = Math.round(Number(b.keep));
+  b.keep = Number.isFinite(keep) ? Math.min(20, Math.max(1, keep)) : 3;
+  b.enabled = b.enabled !== false;
+  b.lastBackupAt = Number(b.lastBackupAt) > 0 ? Number(b.lastBackupAt) : 0;
+  b.lastName = String(b.lastName ?? '');
+  b.dirName = String(b.dirName ?? '');
   return merged;
 }
 
@@ -261,8 +273,11 @@ function save() {
   }
   try {
     backend.setItem(KEY, JSON.stringify(state));
-  } catch {
+    saveError = '';
+  } catch (err) {
+    // 配额写满 / 隐私模式：不能静默吞掉，否则用户以为存好了，刷新就没了
     persistent = false;
+    saveError = String(err?.name || err?.message || err || '写入失败');
   }
 }
 
@@ -285,8 +300,32 @@ export function isPersistent() {
   return persistent;
 }
 
+// 最近一次保存失败的原因（'' = 正常），供设置界面提示
+export function lastSaveError() {
+  return saveError;
+}
+
 export function storageKey() {
   return KEY;
+}
+
+// 用一份完整快照替换内存状态（恢复备份用）：复用 normalize 的迁移与清洗
+export function replaceState(raw) {
+  state = normalize(isPlainObject(raw) ? raw : emptyState());
+  touch();
+  return state;
+}
+
+// 当前状态的纯净可序列化副本（不含函数/句柄），备份与导出用
+export function snapshotState() {
+  const s = getState();
+  return {
+    tasks: s.tasks,
+    series: s.series,
+    tagLibrary: s.tagLibrary,
+    remindLog: s.remindLog,
+    settings: s.settings,
+  };
 }
 
 /* ---------------- 任务操作 ---------------- */
