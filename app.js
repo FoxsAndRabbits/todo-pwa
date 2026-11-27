@@ -24,10 +24,12 @@ import {
   subscribe,
   isPersistent,
   lastSaveError,
+  uid,
   addTask,
   updateTask,
   removeTask,
   toggleDone,
+  toggleSubDone,
   setDoneAt,
   setFavorite,
   updateSettings,
@@ -122,6 +124,11 @@ const els = {
   taskContent: $('#taskContent'),
   taskDate: $('#taskDate'),
   taskPlanAt: $('#taskPlanAt'),
+  taskSubsLabel: $('#taskSubsLabel'),
+  taskSubsToggle: $('#taskSubsToggle'),
+  taskSubsEdit: $('#taskSubsEdit'),
+  taskSubsList: $('#taskSubsList'),
+  taskSubsAdd: $('#taskSubsAdd'),
   taskTagPicker: $('#taskTagPicker'),
   taskTagInput: $('#taskTagInput'),
   taskNote: $('#taskNote'),
@@ -198,7 +205,10 @@ let seriesWeekdays = [];
 let editingSeriesId = null;
 let pendingSeriesDelete = null;
 let seriesDeleteTimer = null;
-let expandedIds = new Set();
+let collapseState = new Map();
+let draftSubs = [];
+let subsEditOpen = false;
+let calendarMonth = monthStartOf(todayISO());
 let dayModalDate = '';
 let toastTimer = null;
 let remindTimer = null;
@@ -230,7 +240,16 @@ function toast(msg, ms = 2200) {
 
 function openModal(id) {
   const el = document.getElementById(id);
-  if (el) el.hidden = false;
+  if (!el) return;
+  // 后打开的弹层一定盖在已经打开的弹层上面：日历(50) → 某天 → 完成时间 / 任务编辑。
+  // 否则从「某天」里点完成/收藏时，新弹层会被 z-index 更高的当日弹层挡住。
+  let top = 49;
+  for (const m of $$('.modal:not([hidden])')) {
+    const z = parseInt(m.style.zIndex || getComputedStyle(m).zIndex, 10);
+    if (Number.isFinite(z) && z > top) top = z;
+  }
+  el.style.zIndex = String(top + 1);
+  el.hidden = false;
 }
 function closeModal(id) {
   const el = document.getElementById(id);
@@ -328,7 +347,10 @@ function render() {
   els.statLine.textContent = isFav
     ? `已收藏 ${st.favorites} 条 · 点卡片展开困难与解决方式`
     : `未完成 ${st.active} · 今日 ${st.today} · 已完成 ${st.done} · 已收藏 ${st.favorites} · 当前显示 ${visible.length} 条`;
-  renderList(visible, today);
+  renderList(visible);
+
+  // 日历里打开着某一天时，卡片改动（勾选 / 删除 / 子任务）要跟着刷新
+  if (dayModalDate && !$('#dayModal').hidden) renderDayList();
 
   els.storageHint.textContent = isPersistent()
     ? '数据已保存在本机浏览器（localStorage）。'
@@ -353,7 +375,8 @@ function render() {
 
 /* ---------------- 日历（左下角按钮打开） ---------------- */
 function currentCalendarMonth() {
-  return snap().settings.ui.calendarMonth || monthStartOf(todayISO());
+  // 不持久化：每次打开日历都回到今天所在月份，翻月只在本次打开期间有效
+  return calendarMonth;
 }
 
 function renderCalendar() {
@@ -420,20 +443,21 @@ function renderCalendar() {
 }
 
 els.btnCalendar.addEventListener('click', () => {
+  calendarMonth = monthStartOf(todayISO());
   renderCalendar();
   openModal('calendarModal');
 });
 
 els.calPrev.addEventListener('click', () => {
-  updateUi({ calendarMonth: addMonths(currentCalendarMonth(), -1) });
+  calendarMonth = addMonths(calendarMonth, -1);
   renderCalendar();
 });
 els.calNext.addEventListener('click', () => {
-  updateUi({ calendarMonth: addMonths(currentCalendarMonth(), 1) });
+  calendarMonth = addMonths(calendarMonth, 1);
   renderCalendar();
 });
 els.calToday.addEventListener('click', () => {
-  updateUi({ calendarMonth: monthStartOf(todayISO()) });
+  calendarMonth = monthStartOf(todayISO());
   renderCalendar();
 });
 els.calMode.addEventListener('click', (e) => {
@@ -451,56 +475,86 @@ els.calGrid.addEventListener('click', (e) => {
 /* ---------------- 某一天 ---------------- */
 function openDayModal(day) {
   dayModalDate = day;
-  const s = snap();
-  const mode = s.settings.ui.calendarMode;
-  const tasks = sortTasks(tasksOnDay(s.tasks, day, mode), s.settings.sort);
   els.dayTitle.textContent = fmtDate(day);
-  els.dayMeta.textContent = `${mode === 'due' ? '当天到期' : '当天开始'} ${tasks.length} 条 · 点任务可编辑`;
-  els.dayList.innerHTML = '';
-  if (!tasks.length) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    const strong = document.createElement('strong');
-    strong.textContent = '这天没有任务';
-    const p = document.createElement('p');
-    p.textContent = '可以点下面「在这天新建」直接加一条。';
-    li.append(strong, p);
-    els.dayList.appendChild(li);
-  } else {
-    for (const task of tasks) els.dayList.appendChild(taskCard(task, todayISO(), { compact: true }));
-  }
+  renderDayList();
   openModal('dayModal');
 }
 
+// 当天列表和主界面共用同一套卡片和事件：勾完成、勾子任务、折叠、编辑、删除都在
+function renderDayList() {
+  const s = snap();
+  const mode = s.settings.ui.calendarMode;
+  const tasks = sortTasks(tasksOnDay(s.tasks, dayModalDate, mode), s.settings.sort);
+  els.dayMeta.textContent = `${mode === 'due' ? '当天到期' : '当天开始'} ${tasks.length} 条 · 卡片功能和主界面一样`;
+  renderTaskList(els.dayList, tasks, {
+    title: '这天没有任务',
+    hint: '可以点下面「在这天新建」直接加一条。',
+  });
+}
+
 $('#dayAdd').addEventListener('click', () => {
-  closeModal('dayModal');
+  // 和卡片上的「编辑」一致：表单盖在当天弹层上面，关掉表单回到当天列表
   openTaskModal(null, dayModalDate || todayISO());
 });
 
 /* ---------------- 列表 ---------------- */
-function renderList(tasks, today) {
-  els.list.innerHTML = '';
+// 主列表和「某天」弹层共用：同一套卡片、同一套空状态结构
+function renderTaskList(container, tasks, empty) {
+  container.innerHTML = '';
   if (!tasks.length) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    const strong = document.createElement('strong');
-    strong.textContent = '这里还没有任务';
-    const p = document.createElement('p');
-    p.textContent = '点右下角 + 新建一条；也可以先用「筛选」把范围缩小。';
-    li.append(strong, p);
-    // 本地一条任务都没有时，给「从备份恢复」入口。不能看「备份过」的标记——
-    // 那个标记和任务存在同一个 localStorage 里，清站点数据时一起没了。
-    if (snap().tasks.length === 0) li.appendChild(emptyRestoreButton());
-    els.list.appendChild(li);
+    container.appendChild(emptyStateItem(empty));
     return;
   }
   const frag = document.createDocumentFragment();
-  for (const t of tasks) frag.appendChild(taskCard(t, today));
-  els.list.appendChild(frag);
+  for (const t of tasks) frag.appendChild(taskCard(t));
+  container.appendChild(frag);
 }
 
-function taskCard(t, today, options = {}) {
-  const compact = !!options.compact;
+function emptyStateItem({ title, hint, restore = false }) {
+  const li = document.createElement('li');
+  li.className = 'empty';
+  const strong = document.createElement('strong');
+  strong.textContent = title;
+  const p = document.createElement('p');
+  p.textContent = hint;
+  li.append(strong, p);
+  // 本地一条任务都没有时，给「从备份恢复」入口。不能看「备份过」的标记——
+  // 那个标记和任务存在同一个 localStorage 里，清站点数据时一起没了。
+  if (restore) li.appendChild(emptyRestoreButton());
+  return li;
+}
+
+function renderList(tasks) {
+  renderTaskList(els.list, tasks, {
+    title: '这里还没有任务',
+    hint: '点右下角 + 新建一条；也可以先用「筛选」把范围缩小。',
+    restore: snap().tasks.length === 0,
+  });
+}
+
+/* ---------------- 卡片里的子任务 ---------------- */
+function subsRow(sub) {
+  const row = document.createElement('div');
+  row.className = 'sub-row';
+  row.dataset.act = 'subToggle';
+  row.dataset.sub = sub.id;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sub-check';
+  btn.setAttribute('aria-pressed', String(sub.done));
+  btn.setAttribute('aria-label', sub.done ? '取消完成这条子任务' : '完成这条子任务');
+  if (sub.done) btn.innerHTML = CHECK_SVG;
+
+  const text = document.createElement('span');
+  text.className = 'sub-text' + (sub.done ? ' done' : '');
+  text.textContent = sub.content;
+
+  row.append(btn, text);
+  return row;
+}
+
+function taskCard(t) {
   const li = document.createElement('li');
   li.className = 'card' + (t.done ? ' done' : '') + (t.favorite ? ' fav' : '');
   li.dataset.id = t.id;
@@ -546,13 +600,6 @@ function taskCard(t, today, options = {}) {
     seriesBadge.title = '由周期任务生成';
     meta.appendChild(seriesBadge);
   }
-  for (const tag of t.tags) {
-    const chip = document.createElement('span');
-    chip.className = 'tag';
-    chip.style.setProperty('--tag-color', tagColor(tag));
-    chip.textContent = tag;
-    meta.appendChild(chip);
-  }
   body.appendChild(meta);
 
   if (t.done && t.doneAt) {
@@ -562,38 +609,61 @@ function taskCard(t, today, options = {}) {
     body.appendChild(doneAt);
   }
 
-  const hasNote = !!t.note;
-  const hasReview = !!(t.review.difficulty || t.review.solution);
-  if (hasNote || hasReview) {
-    const expanded = expandedIds.has(t.id);
-    const box = document.createElement('div');
-    box.className = 'collapse' + (expanded ? ' open' : '');
+  // 标签单独一行，放在完成时间下面
+  if (t.tags.length) {
+    const tagLine = document.createElement('div');
+    tagLine.className = 'meta tags-line';
+    for (const tag of t.tags) {
+      const chip = document.createElement('span');
+      chip.className = 'tag';
+      chip.style.setProperty('--tag-color', tagColor(tag));
+      chip.textContent = tag;
+      tagLine.appendChild(chip);
+    }
+    body.appendChild(tagLine);
+  }
 
-    const head = document.createElement('div');
+  // 卡片只有一个折叠栏：子任务和收藏回顾都放在里面，栏上不写标题。
+  // 有子任务时默认展开，只有回顾时默认收起；展开状态只记在本次会话里。
+  const hasReview = !!(t.review.difficulty || t.review.solution);
+  if (t.subs.length || (t.favorite && hasReview)) {
+    const open = collapseState.has(t.id) ? collapseState.get(t.id) : t.subs.length > 0;
+    const box = document.createElement('div');
+    box.className = 'collapse' + (open ? ' open' : '');
+
+    const head = document.createElement('button');
+    head.type = 'button';
     head.className = 'collapse-head';
     head.dataset.act = 'expand';
+    head.setAttribute('aria-expanded', String(open));
+    head.setAttribute('aria-label', open ? '收起详情' : '展开详情');
     const chev = document.createElement('span');
     chev.className = 'chev';
     chev.textContent = '›';
-    const headLabel = document.createElement('span');
-    headLabel.textContent = hasNote ? '注意事项' : '收藏回顾';
-    head.append(chev, headLabel);
+    head.appendChild(chev);
+    if (t.subs.length) {
+      const doneCount = t.subs.filter((sub) => sub.done).length;
+      const count = document.createElement('span');
+      count.className = 'collapse-count';
+      count.textContent = `${doneCount}/${t.subs.length}`;
+      head.appendChild(count);
+    }
     box.appendChild(head);
 
     const detailBody = document.createElement('div');
     detailBody.className = 'collapse-body';
-    const addDetail = (label, text) => {
-      if (!text) return;
-      const lab = document.createElement('p');
-      lab.className = 'detail-label';
-      lab.textContent = label;
-      const val = document.createElement('p');
-      val.className = 'detail-text';
-      val.textContent = text;
-      detailBody.append(lab, val);
-    };
-    addDetail('注意事项', t.note);
+    for (const sub of t.subs) detailBody.appendChild(subsRow(sub));
     if (t.favorite) {
+      const addDetail = (label, text) => {
+        if (!text) return;
+        const lab = document.createElement('p');
+        lab.className = 'detail-label';
+        lab.textContent = label;
+        const val = document.createElement('p');
+        val.className = 'detail-text';
+        val.textContent = text;
+        detailBody.append(lab, val);
+      };
       addDetail('困难', t.review.difficulty);
       addDetail('解决方式', t.review.solution);
     }
@@ -604,43 +674,41 @@ function taskCard(t, today, options = {}) {
   main.appendChild(body);
   li.appendChild(main);
 
-  if (!compact) {
-    const actions = document.createElement('div');
-    actions.className = 'card-actions';
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
 
-    if (t.done) {
-      const fav = document.createElement('button');
-      fav.type = 'button';
-      fav.className = 'act';
-      fav.dataset.act = 'favorite';
-      fav.setAttribute('aria-pressed', String(t.favorite));
-      fav.textContent = t.favorite ? '已收藏' : '收藏';
-      actions.appendChild(fav);
+  if (t.done) {
+    const fav = document.createElement('button');
+    fav.type = 'button';
+    fav.className = 'act';
+    fav.dataset.act = 'favorite';
+    fav.setAttribute('aria-pressed', String(t.favorite));
+    fav.textContent = t.favorite ? '已收藏' : '收藏';
+    actions.appendChild(fav);
 
-      const when = document.createElement('button');
-      when.type = 'button';
-      when.className = 'act';
-      when.dataset.act = 'doneAt';
-      when.textContent = '完成时间';
-      actions.appendChild(when);
-    }
-
-    const edit = document.createElement('button');
-    edit.type = 'button';
-    edit.className = 'act';
-    edit.dataset.act = 'edit';
-    edit.textContent = '编辑';
-    actions.appendChild(edit);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'act' + (pendingDeleteId === t.id ? ' danger-on' : '');
-    del.dataset.act = 'delete';
-    del.textContent = pendingDeleteId === t.id ? '确认删除' : '删除';
-    actions.appendChild(del);
-
-    li.appendChild(actions);
+    const when = document.createElement('button');
+    when.type = 'button';
+    when.className = 'act';
+    when.dataset.act = 'doneAt';
+    when.textContent = '完成时间';
+    actions.appendChild(when);
   }
+
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'act';
+  edit.dataset.act = 'edit';
+  edit.textContent = '编辑';
+  actions.appendChild(edit);
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'act' + (pendingDeleteId === t.id ? ' danger-on' : '');
+  del.dataset.act = 'delete';
+  del.textContent = pendingDeleteId === t.id ? '确认删除' : '删除';
+  actions.appendChild(del);
+
+  li.appendChild(actions);
 
   li.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target === li) openTaskModal(t.id);
@@ -649,7 +717,7 @@ function taskCard(t, today, options = {}) {
   return li;
 }
 
-function handleCardClick(e, scope) {
+function handleCardClick(e) {
   const card = e.target.closest('.card');
   if (!card) return;
   const id = card.dataset.id;
@@ -658,23 +726,13 @@ function handleCardClick(e, scope) {
   const act = e.target.closest('[data-act]');
 
   if (!act) {
-    if (scope === 'day') {
-      closeModal('dayModal');
-      openTaskModal(id);
-      return;
-    }
     toggleExpanded(id);
     return;
   }
 
   switch (act.dataset.act) {
     case 'expand':
-      if (scope === 'day') {
-        closeModal('dayModal');
-        openTaskModal(id);
-      } else {
-        toggleExpanded(id);
-      }
+      toggleExpanded(id);
       break;
     case 'toggle': {
       if (task.done) {
@@ -693,11 +751,15 @@ function handleCardClick(e, scope) {
       }
       break;
     }
+    case 'subToggle': {
+      toggleSubDone(id, act.dataset.sub);
+      break;
+    }
     case 'doneAt':
       openCompleteModal(id, 'edit');
       break;
     case 'edit':
-      if (scope === 'day') closeModal('dayModal');
+      // 表单直接盖在当天弹层上面；关掉表单回到当天列表，而不是跳回日历
       openTaskModal(id);
       break;
     case 'delete': {
@@ -720,12 +782,14 @@ function handleCardClick(e, scope) {
   }
 }
 
-els.list.addEventListener('click', (e) => handleCardClick(e, 'list'));
-els.dayList.addEventListener('click', (e) => handleCardClick(e, 'day'));
+els.list.addEventListener('click', handleCardClick);
+els.dayList.addEventListener('click', handleCardClick);
 
 function toggleExpanded(id) {
-  if (expandedIds.has(id)) expandedIds.delete(id);
-  else expandedIds.add(id);
+  const task = snap().tasks.find((t) => t.id === id);
+  const fallback = !!(task && task.subs.length);
+  const open = collapseState.has(id) ? collapseState.get(id) : fallback;
+  collapseState.set(id, !open);
   render();
 }
 
@@ -813,6 +877,88 @@ function renderFilterTags() {
 /* ---------------- 任务表单 ---------------- */
 els.fab.addEventListener('click', () => openTaskModal(null));
 
+// 编辑表单里的子任务：只改草稿，点保存才写回任务；这里也能直接勾完成
+function renderSubsEditor() {
+  const doneCount = draftSubs.filter((sub) => sub.done).length;
+  els.taskSubsLabel.textContent = draftSubs.length
+    ? `子任务 · ${draftSubs.length} 条${doneCount ? `（已完成 ${doneCount}）` : ''}`
+    : '子任务（可折叠）';
+  els.taskSubsToggle.textContent = subsEditOpen ? '收起' : '展开';
+  els.taskSubsToggle.setAttribute('aria-expanded', String(subsEditOpen));
+  els.taskSubsEdit.hidden = !subsEditOpen;
+  els.taskSubsList.innerHTML = '';
+
+  draftSubs.forEach((sub, index) => {
+    const row = document.createElement('div');
+    row.className = 'subs-edit-row' + (sub.done ? ' done' : '');
+
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.className = 'sub-check';
+    check.setAttribute('aria-pressed', String(sub.done));
+    check.setAttribute('aria-label', sub.done ? '取消完成这条子任务' : '完成这条子任务');
+    if (sub.done) check.innerHTML = CHECK_SVG;
+    check.addEventListener('click', () => {
+      if (sub.done) {
+        sub.done = false;
+        sub.doneAt = null;
+      } else {
+        sub.done = true;
+        sub.doneAt = Date.now();
+      }
+      renderSubsEditor();
+    });
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = sub.content;
+    input.maxLength = 200;
+    input.placeholder = '子任务内容';
+    input.setAttribute('aria-label', `子任务 ${index + 1}`);
+    input.addEventListener('input', () => {
+      sub.content = input.value;
+    });
+    // 回车 = 在这条后面继续加，输入不用离开键盘
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      addSubRow();
+    });
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'sub-del';
+    del.textContent = '×';
+    del.setAttribute('aria-label', `删除第 ${index + 1} 条子任务`);
+    del.addEventListener('click', () => {
+      draftSubs.splice(index, 1);
+      renderSubsEditor();
+    });
+
+    row.append(check, input, del);
+    els.taskSubsList.appendChild(row);
+  });
+}
+
+function addSubRow() {
+  if (draftSubs.length >= 50) {
+    toast('子任务最多 50 条');
+    return;
+  }
+  draftSubs.push({ id: uid(), content: '', done: false, doneAt: null });
+  subsEditOpen = true;
+  renderSubsEditor();
+  const inputs = els.taskSubsList.querySelectorAll('input');
+  const last = inputs[inputs.length - 1];
+  if (last) last.focus();
+}
+
+els.taskSubsToggle.addEventListener('click', () => {
+  subsEditOpen = !subsEditOpen;
+  renderSubsEditor();
+});
+els.taskSubsAdd.addEventListener('click', addSubRow);
+
 function openTaskModal(id, presetDate) {
   const s = snap();
   const task = id ? s.tasks.find((t) => t.id === id) : null;
@@ -827,6 +973,9 @@ function openTaskModal(id, presetDate) {
   els.taskSolution.value = task ? task.review.solution : '';
   // 只有已收藏的任务才展示困难 / 解决方式
   els.taskReviewFields.hidden = !(task && task.favorite);
+  draftSubs = task ? task.subs.map((sub) => ({ ...sub })) : [];
+  subsEditOpen = draftSubs.length > 0;
+  renderSubsEditor();
   selectedTags = task ? [...task.tags] : [];
   renderTaskTagPicker();
   openModal('taskModal');
@@ -865,10 +1014,13 @@ els.taskForm.addEventListener('submit', (e) => {
   const date = els.taskDate.value || todayISO();
   const tags = [...selectedTags];
   const note = els.taskNote.value.trim();
+  const subs = draftSubs
+    .map((sub) => ({ id: sub.id, content: sub.content.trim(), done: sub.done, doneAt: sub.doneAt }))
+    .filter((sub) => sub.content);
 
   if (editingTaskId) {
     const target = snap().tasks.find((t) => t.id === editingTaskId);
-    const patch = { content, date, planAt, tags, note };
+    const patch = { content, date, planAt, tags, note, subs };
     if (target && target.favorite) {
       patch.review = {
         difficulty: els.taskDifficulty.value.trim(),
@@ -878,7 +1030,7 @@ els.taskForm.addEventListener('submit', (e) => {
     updateTask(editingTaskId, patch);
     toast('已保存');
   } else {
-    addTask({ content, date, planAt, tags, note });
+    addTask({ content, date, planAt, tags, note, subs });
     toast('已添加');
   }
   closeModal('taskModal');
@@ -1480,7 +1632,7 @@ $('#btnClear').addEventListener('click', (e) => {
 });
 
 /* ---------------- 导出（只在设置里） ---------------- */
-const EXPORT_HEADERS = ['序号', '任务内容', '开始日', '计划完成时间', '标签', '状态', '完成时间', '收藏', '周期', '注意事项', '困难', '解决方式'];
+const EXPORT_HEADERS = ['序号', '任务内容', '子任务', '开始日', '计划完成时间', '标签', '状态', '完成时间', '收藏', '周期', '注意事项', '困难', '解决方式'];
 
 function seriesRuleText(task) {
   if (!task.seriesId) return '';
@@ -1488,10 +1640,16 @@ function seriesRuleText(task) {
   return series ? describeRule(series.rule) : '周期';
 }
 
+// 子任务导成一格文本：☑ 已完成的；☐ 未完成的
+function subsText(task) {
+  return (task.subs || []).map((sub) => `${sub.done ? '☑' : '☐'} ${sub.content}`).join('；');
+}
+
 function exportRows(tasks) {
   return tasks.map((t, i) => [
     i + 1,
     t.content,
+    subsText(t),
     t.date,
     t.planAt ? fmtFull(t.planAt) : '',
     (t.tags || []).join('、'),

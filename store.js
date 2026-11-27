@@ -59,7 +59,6 @@ export function defaultSettings() {
       q: '',
       weekOffset: 0,
       calendarMode: 'due',
-      calendarMonth: '',
       dateFrom: '',
       dateTo: '',
       doneFrom: '',
@@ -71,7 +70,7 @@ export function defaultSettings() {
 }
 
 export function emptyState() {
-  return { version: 4, tasks: [], series: [], tagLibrary: [], remindLog: {}, settings: defaultSettings() };
+  return { version: 5, tasks: [], series: [], tagLibrary: [], remindLog: {}, settings: defaultSettings() };
 }
 
 function isPlainObject(v) {
@@ -120,6 +119,7 @@ export function normalizeTask(raw) {
     date,
     planAt,
     tags: Array.isArray(t.tags) ? [...new Set(t.tags.map((x) => String(x).trim()).filter(Boolean))] : [],
+    subs: Array.isArray(t.subs) ? t.subs.map(normalizeSub).filter((s) => s.content).slice(0, 50) : [],
     note,
     done,
     doneAt: done ? Number(t.doneAt) || now : null,
@@ -132,6 +132,18 @@ export function normalizeTask(raw) {
     seriesDate: /^\d{4}-\d{2}-\d{2}$/.test(String(t.seriesDate)) ? t.seriesDate : null,
     createdAt: Number(t.createdAt) || now,
     updatedAt: Number(t.updatedAt) || now,
+  };
+}
+
+// 子任务：任务下面可勾选的小步骤。内容为空的行在归一化时直接丢弃。
+export function normalizeSub(raw) {
+  const s = isPlainObject(raw) ? raw : {};
+  const done = !!s.done;
+  return {
+    id: s.id ? String(s.id) : uid(),
+    content: String(s.content ?? '').trim().slice(0, 200),
+    done,
+    doneAt: done ? Number(s.doneAt) || Date.now() : null,
   };
 }
 
@@ -202,7 +214,7 @@ export function normalizeLibrary(raw, tasks = []) {
 function normalize(raw) {
   const base = emptyState();
   const merged = deepMerge(base, isPlainObject(raw) ? raw : {});
-  merged.version = 4;
+  merged.version = 5;
   merged.tasks = Array.isArray(merged.tasks) ? merged.tasks.filter((t) => t && t.id).map(normalizeTask) : [];
   merged.series = Array.isArray(merged.series) ? merged.series.filter((s) => s && s.id).map(normalizeSeries) : [];
   merged.remindLog = isPlainObject(merged.remindLog) ? merged.remindLog : {};
@@ -219,6 +231,8 @@ function normalize(raw) {
   const ui = merged.settings.ui;
   if (!['all', 'today', 'week', 'fav'].includes(ui.view)) ui.view = 'all';
   if (!['due', 'start'].includes(ui.calendarMode)) ui.calendarMode = 'due';
+  // 日历不再记住上次翻到的月份：打开时总是回到今天，旧数据里的字段顺手清掉
+  delete ui.calendarMonth;
   ui.tags = Array.isArray(ui.tags) ? ui.tags.filter((tag) => merged.tagLibrary.some((t) => t.name === tag)) : [];
   // 搜索词不跨会话保留，其余筛选保留
   ui.q = '';
@@ -330,9 +344,9 @@ export function snapshotState() {
 
 /* ---------------- 任务操作 ---------------- */
 
-export function addTask({ content, date, planAt, tags, note }) {
+export function addTask({ content, date, planAt, tags, note, subs }) {
   const now = Date.now();
-  const task = normalizeTask({ id: uid(), content, date, planAt, tags, note, createdAt: now, updatedAt: now });
+  const task = normalizeTask({ id: uid(), content, date, planAt, tags, note, subs, createdAt: now, updatedAt: now });
   state.tasks.unshift(task);
   ensureTags(task.tags);
   touch();
@@ -347,6 +361,24 @@ export function updateTask(id, patch) {
   ensureTags(task.tags);
   touch();
   return task;
+}
+
+// 勾选 / 取消一条子任务（主界面的小圆勾用，不动父任务的完成状态）
+export function toggleSubDone(taskId, subId, doneAt) {
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task) return null;
+  const sub = (task.subs || []).find((s) => s.id === subId);
+  if (!sub) return null;
+  if (sub.done) {
+    sub.done = false;
+    sub.doneAt = null;
+  } else {
+    sub.done = true;
+    sub.doneAt = Number(doneAt) || Date.now();
+  }
+  task.updatedAt = Date.now();
+  touch();
+  return sub;
 }
 
 export function removeTask(id) {
@@ -719,7 +751,14 @@ export function filterTasks(tasks, opts = {}) {
       if (!inRange(isoOf(t.createdAt), createdFrom, createdTo)) return false;
     }
     if (needle) {
-      const hay = [t.content, t.note, ...(t.tags || []), t.review?.difficulty, t.review?.solution]
+      const hay = [
+        t.content,
+        t.note,
+        ...(t.tags || []),
+        ...(t.subs || []).map((s) => s.content),
+        t.review?.difficulty,
+        t.review?.solution,
+      ]
         .join(' ')
         .toLowerCase();
       if (!hay.includes(needle)) return false;

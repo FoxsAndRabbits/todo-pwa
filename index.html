@@ -86,6 +86,16 @@
         <span>任务内容</span>
         <textarea id="taskContent" rows="2" required maxlength="500" placeholder="要做什么？"></textarea>
       </label>
+      <div class="field" id="taskSubsField">
+        <div class="subs-edit-head">
+          <span id="taskSubsLabel">子任务（可折叠）</span>
+          <button type="button" id="taskSubsToggle" class="link-btn" aria-expanded="false">展开</button>
+        </div>
+        <div id="taskSubsEdit" class="subs-edit" hidden>
+          <div id="taskSubsList" class="subs-edit-list"></div>
+          <button type="button" id="taskSubsAdd" class="btn ghost wide">+ 添加一条子任务</button>
+        </div>
+      </div>
       <div class="grid2">
         <label class="field">
           <span>开始日期</span>
@@ -102,7 +112,7 @@
         <label class="field"><span>解决方式</span><textarea id="taskSolution" rows="2" maxlength="1000"></textarea></label>
       </div>
       <label class="field">
-        <span>注意事项（可选，默认折叠）</span>
+        <span>注意事项（可选）</span>
         <textarea id="taskNote" rows="2" maxlength="1000" placeholder="需要留意的点、前置条件…"></textarea>
       </label>
       <div class="field">
@@ -156,14 +166,20 @@
         <p class="hint" id="filterTagEmpty">还没有标签，先去标签库添加。</p>
       </div>
       <div class="field"><span>任务日期</span>
-        <div class="grid2">
+        <div class="range">
+          <span class="range-lab">从</span>
           <input type="date" data-ui="dateFrom" aria-label="任务日期从">
+          <span class="range-sep">～</span>
+          <span class="range-lab">到</span>
           <input type="date" data-ui="dateTo" aria-label="任务日期到">
         </div>
       </div>
       <div class="field"><span>完成时间</span>
-        <div class="grid2">
+        <div class="range">
+          <span class="range-lab">从</span>
           <input type="date" data-ui="doneFrom" aria-label="完成时间从">
+          <span class="range-sep">～</span>
+          <span class="range-lab">到</span>
           <input type="date" data-ui="doneTo" aria-label="完成时间到">
         </div>
         <div class="quick-row">
@@ -173,8 +189,11 @@
         </div>
       </div>
       <div class="field"><span>创建时间</span>
-        <div class="grid2">
+        <div class="range">
+          <span class="range-lab">从</span>
           <input type="date" data-ui="createdFrom" aria-label="创建时间从">
+          <span class="range-sep">～</span>
+          <span class="range-lab">到</span>
           <input type="date" data-ui="createdTo" aria-label="创建时间到">
         </div>
       </div>

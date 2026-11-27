@@ -10,7 +10,7 @@
 import { getState, replaceState, updateSettings, snapshotState } from './store.js';
 
 export const KIND = 'dsh-todo-backup';
-export const SNAPSHOT_VERSION = 4;
+export const SNAPSHOT_VERSION = 5;
 export const BACKUP_PREFIX = 'todo-backup-';
 export const RESTORE_PREFIX = 'todo-before-restore-';
 export const EXT = '.json';
